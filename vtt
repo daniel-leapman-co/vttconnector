@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+"""vtt — command line interface to VT Transaction+ ledger files.
+
+Reads and posts through VT's own COM API (VTA), so VT maintains its indexes,
+cached balances and year-end postings exactly as it does for the GUI.
+
+  vtt info      <file.vtr>
+  vtt accounts  <file.vtr> [--search TEXT]
+  vtt chart     <file.vtr> [--format markdown|json] [--min-usage N]
+  vtt tb        <file.vtr> [--date YYYY-MM-DD]
+  vtt balance   <file.vtr> --account TEXT [--date YYYY-MM-DD]
+  vtt entries   <file.vtr> [--account TEXT] [--from DATE] [--to DATE] [--tail N]
+  vtt post      <file.vtr> (--line ... | --json F | --csv F) [--commit]
+  vtt check     <file.vtr> [--date DATE] [--against REPORT.txt]
+
+A CSV/JSON path of "-" to post reads the batch from stdin.
+
+Posting is a dry run unless --commit is given. A dry run builds and posts the
+transaction through VT, then rolls back — so it reports the same errors a real
+post would while leaving every entry and balance untouched. (The file's bytes do
+change: VT rewrites housekeeping whenever a company is opened for write.)
+
+VAT is never a line of its own. Put the net on the expense or income line and
+its VAT in that line's `vat` field; VT then builds the VAT entry itself and
+records the net against it, which is what boxes 6 and 7 of the return are
+analysed from. A `vat` of 0 keeps the line on the return at a nil rate; leaving
+`vat` empty puts it outside the scope of VAT altogether.
+
+Add --json to any command for machine-readable output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import csv
+import datetime
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import vtaconnect
+
+
+# ---------------------------------------------------------------- formatting
+
+def money(v) -> str:
+    return f"{v:,.2f}"
+
+
+def print_table(rows, headers, aligns=None):
+    if not rows:
+        print("(none)")
+        return
+    cols = list(zip(*([headers] + [[str(c) for c in r] for r in rows])))
+    widths = [max(len(c) for c in col) for col in cols]
+    aligns = aligns or ["<"] * len(headers)
+    line = "  ".join(f"{h:{a}{w}}" for h, w, a in zip(headers, widths, aligns))
+    print(line)
+    print("  ".join("-" * w for w in widths))
+    for r in rows:
+        print("  ".join(f"{str(c):{a}{w}}" for c, w, a in zip(r, widths, aligns)))
+
+
+def emit(args, payload, render):
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        render(payload)
+
+
+def account_match(row, needle):
+    """Case-insensitive substring match on a row's ledger or account.
+
+    Matches "Ledger|Account", "Ledger", or "Account" fragments, so both
+    '--account "Bank|Current"' and '--account lloyds' work.
+    """
+    if not needle:
+        return True
+    needle = needle.lower()
+    return (needle in row["account"].lower()
+            or needle in row["ledger"].lower()
+            or needle in f"{row['ledger']}|{row['account']}".lower())
+
+
+# ---------------------------------------------------------------- posting input
+
+def parse_amount(text, what, where):
+    try:
+        return float(str(text).replace(",", "").replace("£", "").strip())
+    except ValueError:
+        raise SystemExit(f"{where}: bad {what} {text!r}")
+
+
+def parse_lines(specs, date, ttype, text, ref):
+    """--line 'Ledger|Account=123.45[@VAT][:narrative]' repeated."""
+    lines = []
+    for s in specs:
+        if "=" not in s:
+            raise SystemExit(f"bad --line {s!r}: expected ACCOUNT=AMOUNT[@VAT][:TEXT]")
+        account, _, rest = s.partition("=")
+        amount, _, note = rest.partition(":")
+        amount, at, vat = amount.partition("@")
+        line = {"account": account.strip(),
+                "amount": parse_amount(amount, "amount", f"--line {s!r}")}
+        if at:
+            line["vat"] = parse_amount(vat, "VAT", f"--line {s!r}")
+        if note:
+            line["text"] = note
+        lines.append(line)
+    tran = {"type": ttype, "date": date, "text": text or "", "lines": lines}
+    if ref:
+        tran["ref"] = ref
+    return [tran]
+
+
+def parse_csv(path):
+    """CSV columns: date,type,ref,text,account,amount[,vat][,line_text]
+
+    Consecutive rows sharing date/type/ref/text form one transaction.
+    A path of "-" reads from stdin.
+
+    `amount` is always the NET. A `vat` value — including an explicit 0 — puts
+    that net line within VAT scope, which is what makes VT build the VAT entry
+    and carry the net into box 6/7. An empty `vat` cell leaves the line outside
+    the scope of VAT entirely, so the distinction between "0" and blank matters:
+    0 is a zero-rated or exempt supply that still belongs on the return, blank
+    is one that does not.
+    """
+    trans, key_of = [], None
+    fh = sys.stdin if path == "-" else open(path, newline="", encoding="utf-8-sig")
+    try:
+        for i, row in enumerate(csv.DictReader(fh), start=2):
+            missing = {"date", "account", "amount"} - set(row)
+            if missing:
+                raise SystemExit(f"{path} line {i}: missing column(s) {sorted(missing)}")
+            key = (row["date"], row.get("type") or "JRN",
+                   row.get("ref") or "", row.get("text") or "")
+            if key != key_of:
+                tran = {"type": key[1], "date": key[0], "text": key[3], "lines": []}
+                if key[2]:
+                    tran["ref"] = int(key[2])
+                trans.append(tran)
+                key_of = key
+            line = {"account": row["account"],
+                    "amount": parse_amount(row["amount"], "amount", f"{path} line {i}")}
+            if (row.get("vat") or "").strip():
+                line["vat"] = parse_amount(row["vat"], "VAT", f"{path} line {i}")
+            if row.get("line_text"):
+                line["text"] = row["line_text"]
+            trans[-1]["lines"].append(line)
+    finally:
+        if fh is not sys.stdin:
+            fh.close()
+    if not trans:
+        raise SystemExit(f"{path}: no rows")
+    return trans
+
+
+def apply_entry_details(spec):
+    """Make each line's entry details read as an extension of the transaction's.
+
+    VT has two narratives: the transaction's Details, which titles the whole
+    thing, and each entry's Entry details, which is what you see against the
+    line when you open one account's ledger. Read on its own — which is how it
+    is always read — a bare "insurance" says nothing about whose insurance or
+    which invoice, so an entry detail carries the transaction's details and then
+    qualifies them:
+
+        Details       14 GIS Ltd chambers account inv 2245 (April)
+        Entry details 14 GIS Ltd chambers account inv 2245 (April) - insurance
+
+    So `line_text` is a qualifier, not a replacement: it is appended to the
+    transaction details unless it already contains them. Give no `line_text` and
+    the entry details are the transaction details verbatim, which is what an
+    ordinary one-sided payment or receipt wants.
+    """
+    for t in spec:
+        head = (t.get("text") or "").strip()
+        for line in t["lines"]:
+            note = (line.get("text") or "").strip()
+            if not note:
+                # VT copies the transaction details down itself. Leave it to do so
+                # rather than writing the same string twice.
+                line.pop("text", None)
+            elif not head or head.lower() in note.lower():
+                line["text"] = note
+            else:
+                line["text"] = f"{head} - {note}"
+
+
+def check_balances(spec):
+    """Every transaction must sum to zero once its VAT is counted in.
+
+    The `vat` on a net line is posted by VT as a separate entry, so it is part
+    of the transaction total even though it never appears as a row of its own.
+    """
+    for t in spec:
+        for l in t["lines"]:
+            vat = l.get("vat")
+            if vat and l["amount"] and (vat > 0) != (l["amount"] > 0):
+                raise SystemExit(
+                    f"transaction {t['date']} {t.get('text','')!r}: VAT {vat:+.2f} on "
+                    f"{l['account']!r} has the opposite sign to its net {l['amount']:+.2f}. "
+                    f"VAT is signed like the net it belongs to (both debits on a "
+                    f"purchase, both credits on a sale).")
+        total = round(sum(l["amount"] + (l.get("vat") or 0.0) for l in t["lines"]), 2)
+        if total:
+            gross = " (net + VAT)" if any("vat" in l for l in t["lines"]) else ""
+            raise SystemExit(
+                f"transaction {t['date']} {t.get('text','')!r} does not balance"
+                f"{gross} (sums to {total:+.2f})")
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_info(args):
+    def render(d):
+        for k in ("company", "vatNumber", "vatRegistered", "currentYearEnd",
+                  "lockDate", "accounts", "transactions"):
+            print(f"{k:<15} {d[k]}")
+        print(f"{'tranTypes':<15} {' '.join(d['tranTypes'])}")
+    emit(args, vtaconnect.info(args.file), render)
+
+
+def cmd_accounts(args):
+    rows = vtaconnect.accounts(args.file)
+    if args.search:
+        needle = args.search.lower()
+        rows = [r for r in rows
+                if needle in r["account"].lower() or needle in r["ledger"].lower()]
+    emit(args, rows, lambda rs: print_table(
+        [(r["ledger"], r["account"], r.get("code") or "") for r in rs],
+        ["Ledger", "Account", "Code"]))
+
+
+def cmd_chart(args):
+    """Chart of accounts with the context needed to code a transaction to it."""
+    accounts = vtaconnect.accounts(args.file)
+    entries = vtaconnect.entries(args.file)
+
+    # Year-end entries are excluded from the usage counts and narratives: they are
+    # VT's own bookkeeping, not a precedent for coding anything.
+    real = collections.defaultdict(list)
+    for e in entries:
+        if e["type"] != "YET":
+            real[(e["ledger"], e["account"])].append(e)
+
+    date = args.date or max((e["date"] for e in entries), default=None)
+    balances = {}
+    if date:
+        balances = {(r["ledger"], r["account"]): r["balance"]
+                    for r in vtaconnect.trial_balance(args.file, date)["rows"]}
+
+    rows = []
+    for a in accounts:
+        k = (a["ledger"], a["account"])
+        used = real.get(k, [])
+        # Prefer narratives off real-world transactions. Journal text ("From the
+        # sheet", "TB 2022") is bookkeeping shorthand and no help in deciding
+        # where a bank payment belongs, so it only fills in what is left.
+        def top(pool):
+            c = collections.Counter((e["text"] or "").strip() for e in pool
+                                    if (e["text"] or "").strip())
+            return [t for t, _ in c.most_common(args.precedent)]
+
+        live = [e for e in used if e["type"] not in ("JRN", "RJN", "CLR")]
+        narratives = top(live)
+        for t in top(used):
+            if len(narratives) >= args.precedent:
+                break
+            if t not in narratives:
+                narratives.append(t)
+        rows.append({
+            "ledger": a["ledger"],
+            "account": a["account"],
+            "type": "P&L" if a.get("isPL") else "BS",
+            "listType": a.get("listType"),
+            "entries": len(used),
+            "lastUsed": max((e["date"] for e in used), default=None),
+            "balance": round(balances.get(k, 0.0), 2),
+            "narratives": narratives,
+        })
+
+    hidden = [r for r in rows if r["entries"] < args.min_usage]
+    rows = [r for r in rows if r["entries"] >= args.min_usage]
+    rows.sort(key=lambda r: (r["type"] != "P&L", r["ledger"], -r["entries"], r["account"]))
+    payload = {"company": vtaconnect.info(args.file)["company"], "asAt": date,
+               "shown": len(rows), "hidden": len(hidden), "accounts": rows}
+
+    if args.format == "json":
+        print(json.dumps(payload, indent=2))
+        return
+    if args.format == "markdown":
+        print(f"# Chart of accounts — {payload['company']}\n")
+        print(f"Balances at {date}. {len(rows)} accounts in use"
+              + (f"; {len(hidden)} unused accounts omitted.\n" if hidden else ".\n"))
+        for led in dict.fromkeys(r["ledger"] for r in rows):
+            group = [r for r in rows if r["ledger"] == led]
+            print(f"\n## {led} ({group[0]['type']})\n")
+            print("| Account | Used | Last | Balance | Typical narratives |")
+            print("| --- | ---: | --- | ---: | --- |")
+            for r in group:
+                print(f"| {r['account']} | {r['entries']} | {r['lastUsed'] or ''} "
+                      f"| {money(r['balance'])} | {'; '.join(r['narratives'])} |")
+            if group[0]["listType"]:
+                print(f"\n*Control ledger ({group[0]['listType']}) — post to the "
+                      f"customer or supplier, not directly to the account.*")
+        return
+
+    print_table(
+        [(r["ledger"], r["account"], r["type"] + ("*" if r["listType"] else ""),
+          r["entries"], r["lastUsed"] or "", money(r["balance"]),
+          "; ".join(r["narratives"])[:58]) for r in rows],
+        ["Ledger", "Account", "", "Used", "Last used", "Balance", "Typical narratives"],
+        ["<", "<", "<", ">", "<", ">", "<"])
+    if any(r["listType"] for r in rows):
+        print("\n* control ledger — post to the customer/supplier, not the account")
+    print(f"\n{len(rows)} accounts in use at {date}"
+          + (f"; {len(hidden)} unused omitted (--min-usage 0 to show)." if hidden else "."))
+
+
+def cmd_tb(args):
+    tb = vtaconnect.trial_balance(args.file, args.date)
+
+    def render(d):
+        print(f"{d['company']} — trial balance at {d['date']}\n")
+        rows = sorted(d["rows"], key=lambda r: (r["ledger"], r["account"]))
+        print_table(
+            [(r["ledger"], r["account"],
+              money(r["balance"]) if r["balance"] > 0 else "",
+              money(-r["balance"]) if r["balance"] < 0 else "") for r in rows],
+            ["Ledger", "Account", "Debit", "Credit"], ["<", "<", ">", ">"])
+        dr = sum(r["balance"] for r in rows if r["balance"] > 0)
+        cr = -sum(r["balance"] for r in rows if r["balance"] < 0)
+        print(f"\n{'Total':<40}{money(dr):>16}{money(cr):>16}")
+        if round(d["total"], 2):
+            print(f"\nWARNING: trial balance does not sum to zero ({d['total']})")
+
+    emit(args, tb, render)
+
+
+def cmd_balance(args):
+    """Book value of one account (or a few) at a date — the reconcile anchor.
+
+    Reuses the VTA-authoritative trial balance, which already excludes the
+    closing year end, then filters to the account(s) the --account fragment
+    matches. Prints a single figure to diff against a statement, before and
+    after posting.
+    """
+    tb = vtaconnect.trial_balance(args.file, args.date)
+    matched = [r for r in tb["rows"] if account_match(r, args.account)]
+    rows = [{"ledger": r["ledger"], "account": r["account"],
+             "balance": round(r["balance"], 2)} for r in matched]
+    rows.sort(key=lambda r: (r["ledger"], r["account"]))
+    total = round(sum(r["balance"] for r in rows), 2)
+    payload = {"company": tb["company"], "date": args.date,
+               "account": args.account, "matched": rows, "balance": total}
+
+    def render(d):
+        if not d["matched"]:
+            print(f"no account matches {d['account']!r}")
+            return
+        for r in d["matched"]:
+            print(f"{r['ledger']}|{r['account']:<30} {money(r['balance']):>16}")
+        if len(d["matched"]) > 1:
+            print(f"{'TOTAL':<31} {money(d['balance']):>16}")
+
+    emit(args, payload, render)
+
+
+def cmd_entries(args):
+    rows = vtaconnect.entries(args.file)
+    if args.account:
+        rows = [r for r in rows if account_match(r, args.account)]
+    if args.since:
+        rows = [r for r in rows if r["date"] >= args.since]
+    if args.until:
+        rows = [r for r in rows if r["date"] <= args.until]
+    rows.sort(key=lambda r: (r["date"], r["ref"]))
+    if args.tail:
+        rows = rows[-args.tail:]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    w = csv.writer(sys.stdout)
+    w.writerow(["date", "type", "ref", "ledger", "account", "text", "amount",
+                "vat_net", "in_scope"])
+    for r in rows:
+        w.writerow([r["date"], r["type"], r["ref"], r["ledger"],
+                    r["account"], r["text"], f"{r['amount']:.2f}",
+                    "" if r.get("net") is None else f"{r['net']:.2f}",
+                    "y" if r.get("inScope") else ""])
+
+
+def cmd_post(args):
+    if args.json_file:
+        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text()
+        spec = json.loads(text)
+        spec = spec if isinstance(spec, list) else [spec]
+    elif args.csv_file:
+        spec = parse_csv(args.csv_file)
+    elif args.line:
+        if not args.date:
+            raise SystemExit("--date is required with --line")
+        spec = parse_lines(args.line, args.date, args.type, args.text, args.ref)
+    else:
+        raise SystemExit("give one of --line, --json or --csv")
+
+    apply_entry_details(spec)
+    check_balances(spec)
+
+    backup = None
+    if args.commit and not args.no_backup:
+        src = Path(args.file)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = src.with_name(f"{src.stem}.{stamp}.bak{src.suffix}")
+        shutil.copy2(src, backup)
+
+    result = vtaconnect.post(args.file, spec, commit=args.commit)
+    if backup:
+        result["backup"] = str(backup)
+
+    def render(d):
+        for t in d["posted"]:
+            # Show the VAT VT actually stored, and the net it carries: a VAT entry
+            # with no net behind it is the failure this output exists to make visible.
+            vat = ""
+            if t.get("vat") is not None:
+                vat = f"  VAT {money(t['vat'])} on net {money(t['net'])}"
+            print(f"{t['date']}  {t['type']}  ref {t['ref']:<6} "
+                  f"{t['lines']} lines  {t['text']}{vat}")
+        if d["committed"]:
+            print(f"\nCommitted. Verify() = {d['verify']} "
+                  f"({'no errors' if d['ok'] else 'ERRORS'})")
+            if d.get("backup"):
+                print(f"Backup: {d['backup']}")
+        else:
+            print("\nDry run — file unchanged. Re-run with --commit to post.")
+
+    emit(args, result, render)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_check(args):
+    """Cross-check VTA against the independent parser, and optionally a report."""
+    import vtr
+
+    date = datetime.date.fromisoformat(args.date)
+    via_com = {(r["ledger"], r["account"]): round(r["balance"], 2)
+               for r in vtaconnect.trial_balance(args.file, args.date)["rows"]}
+
+    f = vtr.VtrFile(args.file)
+    bal = f.trial_balance(date)
+    via_py = {(f.accounts[n].ledger_name, f.accounts[n].name): round(v / vtr.SCALE, 2)
+              for n, v in bal.items() if n in f.accounts}
+
+    sources = {"VTA": via_com, "parser": via_py}
+    if args.against:
+        sources["report"] = parse_report(args.against)
+
+    keys = sorted(set().union(*(s.keys() for s in sources.values())))
+    names = list(sources)
+    rows, bad = [], 0
+    for k in keys:
+        vals = [sources[n].get(k) for n in names]
+        ok = len(set(vals)) == 1
+        bad += not ok
+        rows.append([f"{k[0]} / {k[1]}"] + [("" if v is None else money(v)) for v in vals]
+                    + ["" if ok else "MISMATCH"])
+
+    if args.json:
+        print(json.dumps({"agree": len(keys) - bad, "lines": len(keys),
+                          "sources": names,
+                          "rows": [dict(zip(["account"] + names + ["flag"], r))
+                                   for r in rows]}, indent=2))
+    else:
+        print_table(rows, ["Ledger / Account"] + names + [""],
+                    ["<"] + [">"] * len(names) + ["<"])
+        print(f"\n{len(keys) - bad}/{len(keys)} lines agree across {', '.join(names)}")
+    return 1 if bad else 0
+
+
+def parse_report(path):
+    """Parse a VT trial balance report saved as tab separated text."""
+    out, ledger = {}, ""
+    for line in open(path, encoding="utf-8-sig"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 4 or parts[1] in ("Account", ""):
+            continue
+        if parts[0].strip():
+            ledger = parts[0].strip()
+        if parts[0].strip() in ("Total", "Net profit for the year"):
+            continue
+        num = lambda s: float(s.replace(",", "")) if s.strip() else 0.0
+        out[(ledger, parts[1].strip())] = round(num(parts[2]) - num(parts[3]), 2)
+    return out
+
+
+# ---------------------------------------------------------------- entry point
+
+def build_parser():
+    today = datetime.date.today().isoformat()
+    p = argparse.ArgumentParser(
+        prog="vtt", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp):
+        sp.add_argument("file", help="path to the .vtr file")
+        sp.add_argument("--json", action="store_true", help="machine-readable output")
+        return sp
+
+    common(sub.add_parser("info", help="company summary")).set_defaults(fn=cmd_info)
+
+    sp = common(sub.add_parser("accounts", help="list accounts"))
+    sp.add_argument("--search", help="filter on ledger or account name")
+    sp.set_defaults(fn=cmd_accounts)
+
+    sp = common(sub.add_parser("chart", help="chart of accounts with coding context"))
+    sp.add_argument("--format", choices=["table", "markdown", "json"], default="table")
+    sp.add_argument("--min-usage", type=int, default=1, dest="min_usage",
+                    metavar="N", help="hide accounts used fewer than N times (default 1)")
+    sp.add_argument("--with-precedent", type=int, default=3, dest="precedent",
+                    metavar="N", help="show N most common prior narratives (default 3)")
+    sp.add_argument("--date", help="balances as at (default: last entry in the file)")
+    sp.set_defaults(fn=cmd_chart)
+
+    sp = common(sub.add_parser("tb", help="trial balance"))
+    sp.add_argument("--date", default=today, help="as at date (default today)")
+    sp.set_defaults(fn=cmd_tb)
+
+    sp = common(sub.add_parser("balance", help="book value of one account at a date"))
+    sp.add_argument("--account", required=True,
+                    help="ledger/account name fragment (e.g. 'Bank|Current' or 'lloyds')")
+    sp.add_argument("--date", default=today, help="as at date (default today)")
+    sp.set_defaults(fn=cmd_balance)
+
+    sp = common(sub.add_parser("entries", help="export entries as CSV"))
+    sp.add_argument("--account",
+                    help="filter to a ledger/account name fragment (e.g. 'lloyds')")
+    sp.add_argument("--from", dest="since", help="earliest date")
+    sp.add_argument("--to", dest="until", help="latest date")
+    sp.add_argument("--tail", type=int, metavar="N",
+                    help="keep only the last N rows after sorting")
+    sp.set_defaults(fn=cmd_entries)
+
+    sp = common(sub.add_parser("post", help="post transactions"))
+    sp.add_argument("--line", action="append",
+                    help="ACCOUNT=AMOUNT[@VAT][:TEXT]; repeat per line. Positive "
+                         "debit, negative credit, net plus VAT must sum to zero")
+    sp.add_argument("--date", help="transaction date")
+    sp.add_argument("--type", default="JRN", help="transaction type code (default JRN)")
+    sp.add_argument("--text", help="transaction narrative")
+    sp.add_argument("--ref", type=int, help="reference number (VT allocates if omitted)")
+    sp.add_argument("--json-file", "--from-json", dest="json_file", metavar="F")
+    sp.add_argument("--csv", dest="csv_file", metavar="F",
+                    help="CSV: date,type,ref,text,account,amount[,vat][,line_text]")
+    sp.add_argument("--commit", action="store_true", help="actually write (default dry run)")
+    sp.add_argument("--no-backup", action="store_true", help="skip the pre-commit backup")
+    sp.set_defaults(fn=cmd_post)
+
+    sp = common(sub.add_parser("check", help="reconcile VTA against the parser"))
+    sp.add_argument("--date", default=today)
+    sp.add_argument("--against", metavar="REPORT.txt",
+                    help="also compare a VT trial balance report (tab separated)")
+    sp.set_defaults(fn=cmd_check)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args) or 0
+    except vtaconnect.VtaError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

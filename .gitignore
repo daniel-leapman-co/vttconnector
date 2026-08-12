@@ -1,0 +1,13 @@
+# VT Software's own COM DLL. Installed by VT Transaction+ at
+# C:\Windows\SysWow64\VTA.dll — not ours to redistribute, and not needed here.
+VTA.dll
+
+# Client data must never be committed.
+*.vtr
+*.bak.vtr
+*.csv
+*.xlsx
+*.xls
+
+__pycache__/
+*.pyc
