@@ -301,6 +301,16 @@ all — a `vat` on one of those is an error, not a silent omission. Use `PAY`,
   fails, the whole batch is rolled back.
 * After committing, `Company.Verify()` is run; a non-zero result is reported and
   the CLI exits non-zero.
+* These backups accumulate fast during any multi-step posting session (batch
+  testing, bisection, etc.) and are easy to mistake for the live file since they
+  still end in `.vtr`. Once a posting session is done and the result has been
+  verified (`vtt tb`, `vtt check`, a reconciliation against source statements),
+  move the backups out of the working folder into their own subfolder and rename
+  the extension from `NAME.<timestamp>.bak.vtr` to `NAME.<timestamp>.vtr.bak` —
+  swapping the order so the file's actual extension is `.bak`. That stops Windows/VT
+  from associating the file with the VT app (no accidental double-click-to-open),
+  while `vtr` stays visible in the name for identification. Restoring one is just
+  stripping the trailing `.bak` and copying it back over the live file.
 
 ### Year ends
 
