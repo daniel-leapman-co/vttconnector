@@ -11,6 +11,8 @@ cached balances and year-end postings exactly as it does for the GUI.
   vtt balance   <file.vtr> --account TEXT [--date YYYY-MM-DD]
   vtt entries   <file.vtr> [--account TEXT] [--from DATE] [--to DATE] [--tail N]
   vtt post      <file.vtr> (--line ... | --json F | --csv F) [--commit]
+  vtt show      <file.vtr> (--id N | --type T --ref N | --date D [--text T])
+  vtt edit      <file.vtr> <selector> [--account A] [--vat R] [--split A=N] ... [--commit]
   vtt check     <file.vtr> [--date DATE] [--against REPORT.txt]
 
 A CSV/JSON path of "-" to post reads the batch from stdin.
@@ -443,6 +445,161 @@ def cmd_post(args):
     return 0 if result.get("ok") else 1
 
 
+# ---------------------------------------------------------------- show / edit
+
+def selector_from(args):
+    sel = {}
+    for k in ("id", "type", "ref", "date", "text", "amount", "limit"):
+        v = getattr(args, f"sel_{k}", None)
+        if v is not None:
+            sel[k] = v
+    if getattr(args, "sel_from", None):
+        sel["from"] = args.sel_from
+    if getattr(args, "sel_to", None):
+        sel["to"] = args.sel_to
+    return sel
+
+
+def render_tran(t, mark_lines=()):
+    flags = []
+    if t.get("inVATReturn"):
+        flags.append("IN VAT RETURN")
+    if t.get("locked"):
+        flags.append("LOCKED")
+    print(f"id {t['id']}  {t['type']} ref {t['ref']}  {t['date']}  {t['text']}"
+          + (f"   [{', '.join(flags)}]" if flags else ""))
+    if t.get("notes"):
+        print(f"    notes: {t['notes']}")
+    for l in t["lines"]:
+        tag = {"primary": "prim", "vat": "VAT ", "line": "    "}[l["role"]]
+        extra = ""
+        if l["role"] == "vat" and l.get("vatNet") is not None:
+            extra = f"  (on net {money(l['vatNet'])})"
+        elif l.get("inScope"):
+            extra = "  in VAT scope"
+        mark = "*" if l["n"] in mark_lines else " "
+        print(f"  {mark}{l['n']:>2} {tag} {l['ledger'] + '|' + l['account']:<44} "
+              f"{money(l['amount']):>12}{extra}")
+
+
+def cmd_show(args):
+    sel = selector_from(args)
+    if not sel:
+        raise SystemExit("give --id, --type/--ref, or --date/--from/--to/--text to find transactions")
+    res = vtaconnect.show(args.file, sel)
+
+    def render(d):
+        if not d["transactions"]:
+            print("no transaction matches")
+            return
+        for t in d["transactions"]:
+            render_tran(t)
+            print()
+        more = d["matched"] - len(d["transactions"])
+        print(f"{d['matched']} matched" + (f" ({more} not shown; --limit)" if more > 0 else "")
+              + (f". Lock date {d['lockDate']}." if d.get("lockDate") else "."))
+
+    emit(args, res, render)
+
+
+def parse_vat(text):
+    """--vat 20% | 20 | 1.00 | none. A bare whole number is a rate if it is one of
+    the UK rates, otherwise an amount; say '6.00' or '5%' to be explicit."""
+    s = str(text).strip().lower()
+    if s in ("none", "outside", "out"):
+        return {"vatNone": True}
+    if s.endswith("%"):
+        return {"vatRate": parse_amount(s[:-1], "VAT rate", "--vat")}
+    if s in ("0", "5", "20"):
+        return {"vatRate": float(s)}
+    return {"vatAmount": parse_amount(s, "VAT amount", "--vat")}
+
+
+def parse_split(s):
+    if "=" not in s:
+        raise SystemExit(f"bad --split {s!r}: expected ACCOUNT=AMOUNT[:TEXT]")
+    account, _, rest = s.partition("=")
+    amount, _, note = rest.partition(":")
+    d = {"account": account.strip(), "amount": parse_amount(amount, "amount", f"--split {s!r}")}
+    if note:
+        d["text"] = note
+    return d
+
+
+def cmd_edit(args):
+    if args.json_file:
+        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text()
+        spec = json.loads(text)
+        spec = spec if isinstance(spec, list) else [spec]
+    else:
+        e = selector_from(args)
+        if not e:
+            raise SystemExit("give --id, --type/--ref, or --date/--text to pick the transaction")
+        if args.set_text is not None:
+            e["newText"] = args.set_text
+        if args.notes is not None:
+            e["notes"] = args.notes
+        if args.set_date:
+            e["newDate"] = args.set_date
+        if args.line is not None:
+            e["line"] = args.line
+        if args.account:
+            e["account"] = args.account
+        if args.line_text is not None:
+            e["lineText"] = args.line_text
+        if args.vat is not None:
+            e.update(parse_vat(args.vat))
+        if args.split:
+            e["splits"] = [parse_split(s) for s in args.split]
+        if args.force:
+            e["force"] = True
+        spec = [e]
+    if args.force:
+        for e in spec:
+            e["force"] = True
+
+    backup = None
+    if args.commit and not args.no_backup:
+        src = Path(args.file)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = src.with_name(f"{src.stem}.{stamp}.bak{src.suffix}")
+        shutil.copy2(src, backup)
+
+    result = vtaconnect.edit(args.file, spec, commit=args.commit)
+    if backup:
+        result["backup"] = str(backup)
+
+    def render(d):
+        for ed in d["edits"]:
+            b, a = ed["before"], ed["after"]
+            changed = set()
+            bl = {l["n"]: l for l in b["lines"]}
+            for l in a["lines"]:
+                o = bl.get(l["n"])
+                if not o or (o["account"], o["ledger"], o["amount"], o["inScope"]) != \
+                        (l["account"], l["ledger"], l["amount"], l["inScope"]):
+                    changed.add(l["n"])
+            print("BEFORE")
+            render_tran(b)
+            print("AFTER")
+            render_tran(a, changed)
+            for c in ed["changes"]:
+                print(f"  - {c}")
+            for w in ed["warnings"]:
+                print(f"  ! {w}")
+            print()
+        if d["committed"]:
+            print(f"Committed. Verify() = {d['verify']} "
+                  f"({'no errors' if d['ok'] else 'ERRORS'})")
+            if d.get("backup"):
+                print(f"Backup: {d['backup']}")
+        else:
+            print("Dry run — file unchanged. Re-run with --commit to apply.")
+
+    emit(args, result, render)
+    return 0 if result.get("ok") else 1
+
+
 def cmd_check(args):
     """Cross-check VTA against the independent parser, and optionally a report."""
     import vtr
@@ -560,6 +717,49 @@ def build_parser():
     sp.add_argument("--commit", action="store_true", help="actually write (default dry run)")
     sp.add_argument("--no-backup", action="store_true", help="skip the pre-commit backup")
     sp.set_defaults(fn=cmd_post)
+
+    def selector(sp):
+        g = sp.add_argument_group("which transaction")
+        g.add_argument("--id", dest="sel_id", type=int, help="VT transaction identifier (from show)")
+        g.add_argument("--type", dest="sel_type", help="transaction type code, e.g. PAY")
+        g.add_argument("--ref", dest="sel_ref", type=int, help="reference number (with --type)")
+        g.add_argument("--date", dest="sel_date", help="transaction date")
+        g.add_argument("--from", dest="sel_from", help="earliest date")
+        g.add_argument("--to", dest="sel_to", help="latest date")
+        g.add_argument("--text", dest="sel_text", help="fragment of the transaction details")
+        g.add_argument("--amount", dest="sel_amount", type=float,
+                       help="gross amount of the bank/primary line, either sign")
+
+    sp = common(sub.add_parser("show", help="show posted transactions with their lines"))
+    selector(sp)
+    sp.add_argument("--limit", dest="sel_limit", type=int, help="max to show (default 50)")
+    sp.set_defaults(fn=cmd_show)
+
+    sp = common(sub.add_parser(
+        "edit", help="edit a posted transaction (recode, VAT, split, text, date)",
+        description="Edit one posted transaction. Dry run unless --commit. The bank/"
+                    "control line, the gross and VT's own VAT entry are never changed "
+                    "except via --vat, which re-splits a line's gross into net + VAT."))
+    selector(sp)
+    g = sp.add_argument_group("changes")
+    g.add_argument("--line", help="which line: its number from 'vtt show', or an account "
+                                  "fragment (default: the only coded line)")
+    g.add_argument("--account", help="recode the line to this account")
+    g.add_argument("--vat", help="re-split the line's gross: '20%%', '5%%', '0', an amount "
+                                 "such as '1.00', or 'none' for outside the scope of VAT")
+    g.add_argument("--split", action="append", metavar="ACCOUNT=AMOUNT[:TEXT]",
+                   help="move AMOUNT off the line onto a new line; repeatable")
+    g.add_argument("--line-text", dest="line_text", help="set the line's entry details")
+    g.add_argument("--set-text", dest="set_text", help="set the transaction details")
+    g.add_argument("--set-date", dest="set_date", help="move the transaction to this date")
+    g.add_argument("--notes", help="set the transaction notes")
+    sp.add_argument("--json-file", dest="json_file", metavar="F",
+                    help="batch of edits as JSON (see vtaconnect.edit); '-' for stdin")
+    sp.add_argument("--force", action="store_true",
+                    help="allow editing on or before the lock date")
+    sp.add_argument("--commit", action="store_true", help="actually write (default dry run)")
+    sp.add_argument("--no-backup", action="store_true", help="skip the pre-commit backup")
+    sp.set_defaults(fn=cmd_edit)
 
     sp = common(sub.add_parser("check", help="reconcile VTA against the parser"))
     sp.add_argument("--date", default=today)

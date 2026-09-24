@@ -322,12 +322,54 @@ that matters.
 
 ---
 
+## Editing posted transactions
+
+```
+vtt show FILE (--id N | --type PAY --ref N | --date D [--text T] [--amount G])
+vtt edit FILE <same selector> [changes] [--force] [--commit]
+```
+
+`show` lists a transaction's lines numbered as `edit --line` expects, with
+`prim` (bank or control side), `VAT` (VT's own VAT entry) and flags for
+`IN VAT RETURN` and `LOCKED`. `edit` is a dry run unless `--commit`, and prints
+before/after with changed lines starred. A selector must match exactly one
+transaction; if several match, they are listed.
+
+| Change | Flag | Notes |
+| --- | --- | --- |
+| Recode a line | `--account A` | Account name or unique fragment; ambiguous fragments list candidates |
+| Change VAT | `--vat 20%` / `5%` / `0` / `1.00` / `none` | Re-splits the line's gross into net + VAT. Gross and bank line unchanged |
+| Split a line | `--split "A=2.50[:text]"` (repeatable) | Moves the amount onto a new line; inherits VAT scope |
+| Text / notes / date | `--set-text`, `--line-text`, `--notes`, `--set-date` | |
+| Which line | `--line N` or `--line fragment` | Default: the only coded line |
+| Batch | `--json-file F` | List of `vtaconnect.edit` specs, one VT transaction, all or nothing |
+
+**Refused:** the primary (bank/control) line of a PAY/REC/invoice; VT's VAT
+entry; recoding *to* the VAT/net-VAT-due accounts; VT-generated types (YET,
+VAT, CLR …); VAT changes or splits on a transaction in a posted VAT return (VT
+also refuses these); `--vat` when another line is also within VAT scope.
+
+**Soft-blocked:** anything dated — or moved to — on or before the lock date.
+VT does **not** enforce the lock date through COM, so `vtt` does; `--force`
+overrides it and records a warning.
+
+**Allowed on a VAT-return transaction:** recoding and text edits. The return's
+figures are unaffected (checked: return total identical after a recode).
+
+After every edit, before commit, the transaction is re-checked: it balances,
+the primary entry is unchanged, the VAT is unchanged unless `--vat` was given,
+and the VAT entry's net equals the sum of in-scope lines. Any failure rolls back
+the whole batch. `--commit` also runs `Verify()` and takes a backup as `post`
+does. Year-end postings re-derive themselves, as with a back-dated post.
+
+---
+
 ## Files
 
 | File | What it is |
 | --- | --- |
 | `vtt` | The CLI. Start here. |
-| `vtaconnect.py` | Python wrapper: WSL↔Windows interop, path staging, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`). |
+| `vtaconnect.py` | Python wrapper: WSL↔Windows interop, path staging, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`, `show`, `edit`). |
 | `vta.ps1` | The COM layer. Runs under 32-bit PowerShell; not called directly. |
 | `vtr.py` | Independent read-only parser of the `.vtr` binary format. No Windows needed. Used by `vtt check`. |
 | `dumptlb.ps1` | Dumps VTA interface signatures from the type library. Useful when extending `vta.ps1`. |

@@ -109,6 +109,30 @@ def entries(vtr): return _run("entries", Path(vtr))
 def trial_balance(vtr, date): return _run("tb", Path(vtr), date=date)
 
 
+def show(vtr, selector):
+    """Find posted transactions. `selector` keys: id | type+ref | date/from/to,
+    text (fragment of the details), amount (gross, either sign), limit."""
+    return _run("show", Path(vtr), spec=selector)
+
+
+def edit(vtr, spec, commit=False):
+    """Edit posted transactions. `spec` is a dict or list of dicts, each with a
+    selector (as for show) plus any of:
+
+        newText, notes, newDate          header changes
+        line                             which line: position from show, or an
+                                         account fragment (default: the only one)
+        account                          recode that line
+        lineText                         that line's entry details
+        vatRate | vatAmount | vatNone    re-split that line's gross into net + VAT
+        splits: [{account, amount, text}] carve amounts off that line
+        force                            allow edits on or before the lock date
+
+    The whole batch runs in one VT transaction and is rolled back unless commit.
+    """
+    return _run("edit", Path(vtr), spec=spec, commit=commit)
+
+
 def post(vtr, spec, commit=False):
     """Post transactions. `spec` is a dict or list of dicts:
 
