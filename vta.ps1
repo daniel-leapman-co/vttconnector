@@ -12,6 +12,7 @@
       post      post transactions described by -Json; rolls back unless -Commit
       show      find posted transactions described by -Json (read only)
       edit      edit posted transactions described by -Json; rolls back unless -Commit
+      addaccount  create accounts described by -Json; rolls back unless -Commit
 
     All writes run inside BeginTrans/CommitTrans. Without -Commit the work is
     rolled back, which leaves every entry and balance untouched — that is the
@@ -21,7 +22,7 @@
     failure.
 #>
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('info','accounts','tb','entries','post','show','edit')][string]$Action,
+    [Parameter(Mandatory=$true)][ValidateSet('info','accounts','tb','entries','post','show','edit','addaccount')][string]$Action,
     [Parameter(Mandatory=$true)][string]$File,
     [string]$Date,
     [string]$Json,
@@ -387,7 +388,7 @@ function Invoke-Edit($c, $spec, $map, $all, $protected, $lockDate) {
 }
 
 $g = New-Object -ComObject VTA.GlobalMethods
-$readOnly = ($Action -notin @('post','edit'))
+$readOnly = ($Action -notin @('post','edit','addaccount'))
 $c = $g.OpenCompany($File, $readOnly, "", $false)
 
 try {
@@ -513,6 +514,101 @@ try {
                     $c.RollbackTrans()
                     [pscustomobject]@{ committed = $false; verify = $null; ok = $true
                                        lockDate = (Format-VtDate $c.LockDate); edits = @($results) } | ConvertTo-Json -Depth 7
+                }
+            } catch {
+                $c.RollbackTrans()
+                throw
+            }
+        }
+
+        'addaccount' {
+            # New accounts. Findings this is built on (VTA, checked on a live file):
+            #   * Ledger.Accounts.Add(Name[, Code]) creates the account; VT itself
+            #     refuses a duplicate name in the ledger (case-insensitive) and an
+            #     empty name, but accepts '|', which would break 'Ledger|Account'.
+            #   * A new account's NewEntriesAreWithinVATScope is False, whereas the
+            #     existing P&L accounts on a VAT-registered file are mostly True.
+            #     That flag is VT's GUI default for new entries only; `vtt post`
+            #     sets scope per line regardless. Default it from the ledger's
+            #     own accounts so GUI entry behaves like its neighbours.
+            if (-not $Json) { throw "-Json is required for addaccount" }
+            $spec = Get-Content -Raw -LiteralPath $Json | ConvertFrom-Json
+            if ($spec -isnot [array]) { $spec = @($spec) }
+            $ledgers = @(foreach ($l in $c.Ledgers) { $l })
+            $created = @()
+
+            $c.BeginTrans()
+            try {
+                $i = 0
+                foreach ($s in $spec) {
+                    $i++
+                    $where = "account $i of $($spec.Count)"
+                    $name = ([string]$s.name).Trim()
+                    if (-not $name) { throw "${where}: name is required" }
+                    if ($name.Contains('|')) { throw "${where}: '$name' contains '|', which vtt uses to separate ledger from account" }
+                    if ($name.Length -gt 100) { throw "${where}: name is longer than 100 characters" }
+
+                    $lname = ([string]$s.ledger).Trim()
+                    if (-not $lname) { throw "${where}: ledger is required" }
+                    $led = @($ledgers | Where-Object { $_.Name -eq $lname })
+                    if (-not $led.Count) {
+                        $needle = $lname.ToLower()
+                        $led = @($ledgers | Where-Object { $_.Name.ToLower().Contains($needle) })
+                    }
+                    if ($led.Count -eq 0) { throw "${where}: no ledger matches '$lname'. Ledgers: $((@($ledgers | ForEach-Object { $_.Name })) -join '; ')" }
+                    if ($led.Count -gt 1) { throw "${where}: ledger '$lname' is ambiguous: $((@($led | ForEach-Object { $_.Name })) -join '; ')" }
+                    $led = $led[0]
+
+                    if ($led.Accounts.NameExists($name)) {
+                        throw "${where}: '$($led.Name)|$name' already exists (VT compares names ignoring case)"
+                    }
+                    $code = if ($s.code) { ([string]$s.code).Trim() } else { $null }
+                    if ($code) {
+                        foreach ($a in $c.AllAccounts) {
+                            if ($a.Code -and $a.Code -eq $code) { throw "${where}: code '$code' is already used by '$($a.Parent.Name)|$($a.Name)'" }
+                        }
+                    }
+
+                    $warnings = @()
+                    $elsewhere = @(foreach ($a in $c.AllAccounts) { if ($a.Name -eq $name) { "$($a.Parent.Name)|$($a.Name)" } })
+                    if ($elsewhere.Count) {
+                        $warnings += "an account called '$name' already exists in another ledger ($($elsewhere -join '; ')); refer to the new one as '$($led.Name)|$name'"
+                    }
+                    $lt = $null; try { if ($led.ListType) { $lt = [string]$led.ListType.Name } } catch { }
+
+                    # VAT scope for new entries: explicit, else follow the ledger.
+                    $inLedger = @(foreach ($a in $led.Accounts) { $a })
+                    $scopeYes = @($inLedger | Where-Object { $_.NewEntriesAreWithinVATScope }).Count
+                    $scopeSrc = 'explicit'
+                    if ($null -ne $s.vatScope) { $scope = [bool]$s.vatScope }
+                    elseif ($inLedger.Count) {
+                        $scope = ($scopeYes * 2 -gt $inLedger.Count)
+                        $scopeSrc = "ledger default ($scopeYes of $($inLedger.Count) accounts in scope)"
+                    } else { $scope = $false; $scopeSrc = 'ledger is empty' }
+
+                    $a = if ($code) { $led.Accounts.Add($name, $code) } else { $led.Accounts.Add($name) }
+                    try { $a.NewEntriesAreWithinVATScope = $scope }
+                    catch { $warnings += "VT would not set the VAT scope default: $($_.Exception.Message)" }
+                    if ($s.notes) { $a.Notes = [string]$s.notes }
+
+                    $created += [pscustomobject]@{
+                        ledger = $led.Name; account = $a.Name; code = $a.Code
+                        isPL = [bool]$led.IsPL; listType = $lt
+                        vatScope = [bool]$a.NewEntriesAreWithinVATScope; vatScopeSource = $scopeSrc
+                        notes = $a.Notes; warnings = @($warnings)
+                    }
+                }
+
+                if ($Commit) {
+                    $c.CommitTrans()
+                    $v = $c.Verify()
+                    $c.FlushBuffers()
+                    [pscustomobject]@{ committed = $true; verify = [int]$v; ok = ([int]$v -eq 0)
+                                       created = @($created) } | ConvertTo-Json -Depth 5
+                } else {
+                    $c.RollbackTrans()
+                    [pscustomobject]@{ committed = $false; verify = $null; ok = $true
+                                       created = @($created) } | ConvertTo-Json -Depth 5
                 }
             } catch {
                 $c.RollbackTrans()

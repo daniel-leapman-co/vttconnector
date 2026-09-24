@@ -364,12 +364,37 @@ does. Year-end postings re-derive themselves, as with a back-dated post.
 
 ---
 
+## Adding accounts
+
+```
+vtt add-account FILE --ledger L --name N [--code C] [--vat-scope yes|no] [--notes T] [--commit]
+vtt add-account FILE --json-file accounts.json [--commit]
+```
+
+Creates the account through VT (`Ledger.Accounts.Add`). Dry run unless
+`--commit`, which backs up the file and runs `Verify()`. A JSON batch is a list
+of `{"ledger", "name", "code"?, "vatScope"?, "notes"?}` and is all or nothing.
+
+* `--ledger` is an exact ledger name or a fragment matching exactly one;
+  otherwise the candidates (or all ledgers) are listed.
+* **Refused:** a name already in that ledger (VT compares names ignoring case),
+  an empty name, a name containing `|` (it would break `Ledger|Account`), and an
+  account code already in use anywhere in the file.
+* A name that exists in a *different* ledger is allowed, with a warning to refer
+  to the new one as `Ledger|Account`.
+* **VAT scope default.** VT creates accounts with "new entries within VAT scope"
+  off, whereas most P&L accounts on a VAT-registered file have it on. Unless
+  `--vat-scope` is given, the new account follows the majority of its ledger.
+  This only affects entry typed in the VT GUI; `vtt post` sets scope per line.
+
+---
+
 ## Files
 
 | File | What it is |
 | --- | --- |
 | `vtt` | The CLI. Start here. |
-| `vtaconnect.py` | Python wrapper: WSL↔Windows interop, path staging, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`, `show`, `edit`). |
+| `vtaconnect.py` | Python wrapper: WSL↔Windows interop, path staging, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`, `show`, `edit`, `add_account`). |
 | `vta.ps1` | The COM layer. Runs under 32-bit PowerShell; not called directly. |
 | `vtr.py` | Independent read-only parser of the `.vtr` binary format. No Windows needed. Used by `vtt check`. |
 | `dumptlb.ps1` | Dumps VTA interface signatures from the type library. Useful when extending `vta.ps1`. |

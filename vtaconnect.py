@@ -16,6 +16,7 @@ Without --commit a post is rolled back, which leaves the file unchanged.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -24,7 +25,9 @@ from pathlib import Path
 
 PS32 = Path("/mnt/c/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe")
 SCRIPT = Path(__file__).with_name("vta.ps1")
-STAGE = Path("/mnt/c/Temp/vtaconnect")
+# Overridable so a development checkout can stage its own vta.ps1 without
+# overwriting the one a concurrent run of the installed tool is using.
+STAGE = Path(os.environ.get("VTACONNECT_STAGE", "/mnt/c/Temp/vtaconnect"))
 
 
 class VtaError(RuntimeError):
@@ -131,6 +134,21 @@ def edit(vtr, spec, commit=False):
     The whole batch runs in one VT transaction and is rolled back unless commit.
     """
     return _run("edit", Path(vtr), spec=spec, commit=commit)
+
+
+def add_account(vtr, spec, commit=False):
+    """Create accounts. `spec` is a dict or list of dicts:
+
+        {"ledger": "Expenses", "name": "Cleaning",
+         "code": "X12",        # optional; must be unused
+         "vatScope": true,     # optional; default follows the ledger's accounts
+         "notes": "..."}       # optional
+
+    `ledger` is an exact ledger name or a fragment matching exactly one. A name
+    already in that ledger (ignoring case), an empty name, or one containing '|'
+    is refused. The batch is one VT transaction, rolled back unless commit.
+    """
+    return _run("addaccount", Path(vtr), spec=spec, commit=commit)
 
 
 def post(vtr, spec, commit=False):

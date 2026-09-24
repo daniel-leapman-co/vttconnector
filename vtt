@@ -13,6 +13,7 @@ cached balances and year-end postings exactly as it does for the GUI.
   vtt post      <file.vtr> (--line ... | --json F | --csv F) [--commit]
   vtt show      <file.vtr> (--id N | --type T --ref N | --date D [--text T])
   vtt edit      <file.vtr> <selector> [--account A] [--vat R] [--split A=N] ... [--commit]
+  vtt add-account <file.vtr> --ledger L --name N [--code C] [--vat-scope yes|no] [--commit]
   vtt check     <file.vtr> [--date DATE] [--against REPORT.txt]
 
 A CSV/JSON path of "-" to post reads the batch from stdin.
@@ -600,6 +601,59 @@ def cmd_edit(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_add_account(args):
+    if args.json_file:
+        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text()
+        spec = json.loads(text)
+        spec = spec if isinstance(spec, list) else [spec]
+    else:
+        if not (args.ledger and args.name):
+            raise SystemExit("give --ledger and --name, or --json-file")
+        s = {"ledger": args.ledger, "name": args.name}
+        if args.code:
+            s["code"] = args.code
+        if args.vat_scope is not None:
+            s["vatScope"] = args.vat_scope == "yes"
+        if args.notes:
+            s["notes"] = args.notes
+        spec = [s]
+
+    backup = None
+    if args.commit and not args.no_backup:
+        src = Path(args.file)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = src.with_name(f"{src.stem}.{stamp}.bak{src.suffix}")
+        shutil.copy2(src, backup)
+
+    result = vtaconnect.add_account(args.file, spec, commit=args.commit)
+    if backup:
+        result["backup"] = str(backup)
+
+    def render(d):
+        for a in d["created"]:
+            kind = "P&L" if a["isPL"] else "BS"
+            code = f"  code {a['code']}" if a.get("code") else ""
+            scope = "in VAT scope" if a["vatScope"] else "outside VAT scope"
+            print(f"{'Created' if d['committed'] else 'Would create'} "
+                  f"{a['ledger']}|{a['account']}  ({kind}){code}")
+            print(f"    new entries default to {scope} — {a['vatScopeSource']}")
+            if a.get("listType"):
+                print(f"  ! {a['ledger']} is a control ledger ({a['listType']}); "
+                      f"this creates a {a['listType'].lower()} account")
+            for w in a.get("warnings") or []:
+                print(f"  ! {w}")
+        if d["committed"]:
+            print(f"\nCommitted. Verify() = {d['verify']} "
+                  f"({'no errors' if d['ok'] else 'ERRORS'})")
+            if d.get("backup"):
+                print(f"Backup: {d['backup']}")
+        else:
+            print("\nDry run — file unchanged. Re-run with --commit to create.")
+
+    emit(args, result, render)
+    return 0 if result.get("ok") else 1
+
+
 def cmd_check(args):
     """Cross-check VTA against the independent parser, and optionally a report."""
     import vtr
@@ -760,6 +814,23 @@ def build_parser():
     sp.add_argument("--commit", action="store_true", help="actually write (default dry run)")
     sp.add_argument("--no-backup", action="store_true", help="skip the pre-commit backup")
     sp.set_defaults(fn=cmd_edit)
+
+    sp = common(sub.add_parser(
+        "add-account", help="create a new account in a ledger",
+        description="Create an account through VT. Dry run unless --commit."))
+    sp.add_argument("--ledger", help="ledger name, or a fragment matching exactly one "
+                                     "(see 'vtt accounts')")
+    sp.add_argument("--name", help="new account name")
+    sp.add_argument("--code", help="account code (optional; must be unused)")
+    sp.add_argument("--vat-scope", dest="vat_scope", choices=["yes", "no"],
+                    help="default VAT scope for new entries in the VT GUI "
+                         "(default: follow the ledger's other accounts)")
+    sp.add_argument("--notes", help="account notes")
+    sp.add_argument("--json-file", dest="json_file", metavar="F",
+                    help="batch of accounts as JSON (see vtaconnect.add_account); '-' for stdin")
+    sp.add_argument("--commit", action="store_true", help="actually write (default dry run)")
+    sp.add_argument("--no-backup", action="store_true", help="skip the pre-commit backup")
+    sp.set_defaults(fn=cmd_add_account)
 
     sp = common(sub.add_parser("check", help="reconcile VTA against the parser"))
     sp.add_argument("--date", default=today)
