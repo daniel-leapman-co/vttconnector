@@ -12,7 +12,7 @@ cached balances and year-end postings exactly as it does for the GUI.
   vtt entries   <file.vtr> [--account TEXT] [--from DATE] [--to DATE] [--tail N]
   vtt post      <file.vtr> (--line ... | --json F | --csv F) [--commit]
   vtt show      <file.vtr> (--id N | --type T --ref N | --date D [--text T])
-  vtt edit      <file.vtr> <selector> [--account A] [--vat R] [--split A=N] ... [--commit]
+  vtt edit      <file.vtr> <selector> [--account A] [--vat R] [--split A=N] [--gross-up A=N] ... [--commit]
   vtt add-account <file.vtr> --ledger L --name N [--code C] [--vat-scope yes|no] [--commit]
   vtt check     <file.vtr> [--date DATE] [--against REPORT.txt]
 
@@ -516,12 +516,12 @@ def parse_vat(text):
     return {"vatAmount": parse_amount(s, "VAT amount", "--vat")}
 
 
-def parse_split(s):
+def parse_split(s, flag="--split"):
     if "=" not in s:
-        raise SystemExit(f"bad --split {s!r}: expected ACCOUNT=AMOUNT[:TEXT]")
+        raise SystemExit(f"bad {flag} {s!r}: expected ACCOUNT=AMOUNT[:TEXT]")
     account, _, rest = s.partition("=")
     amount, _, note = rest.partition(":")
-    d = {"account": account.strip(), "amount": parse_amount(amount, "amount", f"--split {s!r}")}
+    d = {"account": account.strip(), "amount": parse_amount(amount, "amount", f"{flag} {s!r}")}
     if note:
         d["text"] = note
     return d
@@ -552,6 +552,10 @@ def cmd_edit(args):
             e.update(parse_vat(args.vat))
         if args.split:
             e["splits"] = [parse_split(s) for s in args.split]
+        if args.gross_up:
+            e["grossUps"] = [parse_split(s, "--gross-up") for s in args.gross_up]
+        if args.keep_vat_net:
+            e["keepVatNet"] = True
         if args.force:
             e["force"] = True
         spec = [e]
@@ -790,7 +794,7 @@ def build_parser():
     sp.set_defaults(fn=cmd_show)
 
     sp = common(sub.add_parser(
-        "edit", help="edit a posted transaction (recode, VAT, split, text, date)",
+        "edit", help="edit a posted transaction (recode, VAT, split, gross up, text, date)",
         description="Edit one posted transaction. Dry run unless --commit. The bank/"
                     "control line, the gross and VT's own VAT entry are never changed "
                     "except via --vat, which re-splits a line's gross into net + VAT."))
@@ -803,6 +807,13 @@ def build_parser():
                                  "such as '1.00', or 'none' for outside the scope of VAT")
     g.add_argument("--split", action="append", metavar="ACCOUNT=AMOUNT[:TEXT]",
                    help="move AMOUNT off the line onto a new line; repeatable")
+    g.add_argument("--gross-up", dest="gross_up", action="append", metavar="ACCOUNT=AMOUNT[:TEXT]",
+                   help="raise the line by AMOUNT against a new opposite-side line on ACCOUNT "
+                        "(e.g. a CIS deduction to the PAYE liability); bank side unchanged; repeatable")
+    g.add_argument("--keep-vat-net", dest="keep_vat_net", action="store_true",
+                   help="with --gross-up: leave the line as it is and post the uplift as a separate "
+                        "out-of-scope line on the same account, so the VAT net is unchanged "
+                        "(required on an in-scope line in a posted VAT return)")
     g.add_argument("--line-text", dest="line_text", help="set the line's entry details")
     g.add_argument("--set-text", dest="set_text", help="set the transaction details")
     g.add_argument("--set-date", dest="set_date", help="move the transaction to this date")
