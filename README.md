@@ -340,6 +340,8 @@ transaction; if several match, they are listed.
 | Recode a line | `--account A` | Account name or unique fragment; ambiguous fragments list candidates |
 | Change VAT | `--vat 20%` / `5%` / `0` / `1.00` / `none` | Re-splits the line's gross into net + VAT. Gross and bank line unchanged |
 | Split a line | `--split "A=2.50[:text]"` (repeatable) | Moves the amount onto a new line; inherits VAT scope |
+| Gross up a line | `--gross-up "A=360[:text]"` (repeatable) | Raises the line by the amount against a new opposite-side line on A, e.g. a CIS deduction credited to PAYE and NI. Bank line unchanged. On a transaction in a posted VAT return the new line takes the line's VAT scope (VT refuses otherwise, and so does the GUI until the 4th line exists), so the return's net is unchanged. Elsewhere it is out of scope and an in-scope line's VAT net rises |
+| …as a separate line | add `--keep-vat-net` | Leaves the line as it is and posts the uplift as a second, out-of-scope line on the same account |
 | Text / notes / date | `--set-text`, `--line-text`, `--notes`, `--set-date` | |
 | Which line | `--line N` or `--line fragment` | Default: the only coded line |
 | Batch | `--json-file F` | List of `vtaconnect.edit` specs, one VT transaction, all or nothing |
@@ -353,11 +355,13 @@ also refuses these); `--vat` when another line is also within VAT scope.
 VT does **not** enforce the lock date through COM, so `vtt` does; `--force`
 overrides it and records a warning.
 
-**Allowed on a VAT-return transaction:** recoding and text edits. The return's
+**Allowed on a VAT-return transaction:** recoding, text edits and
+`--gross-up`. The return's
 figures are unaffected (checked: return total identical after a recode).
 
 After every edit, before commit, the transaction is re-checked: it balances,
 the primary entry is unchanged, the VAT is unchanged unless `--vat` was given,
+the VAT net is unchanged on a transaction in a posted VAT return,
 and the VAT entry's net equals the sum of in-scope lines. Any failure rolls back
 the whole batch. `--commit` also runs `Verify()` and takes a backup as `post`
 does. Year-end postings re-derive themselves, as with a back-dated post.

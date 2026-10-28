@@ -244,6 +244,9 @@ function Assert-Invariants($t, $before, $vatChanged, $grossChangeAllowed) {
         if ($net -ne [math]::Round($inScopeSum, 2)) {
             throw "Internal check failed: VAT net on transaction $($t.Identifier) is $net but its in-scope lines sum to $([math]::Round($inScopeSum,2))"
         }
+        if ($before.inVATReturn -and $vb.Count -and $null -ne $vb[0].vatNet -and $net -ne [math]::Round([double]$vb[0].vatNet, 2)) {
+            throw "Internal check failed: transaction $($t.Identifier) is in a posted VAT return and its VAT net changed ($($vb[0].vatNet) -> $net)"
+        }
     }
 }
 
@@ -279,6 +282,8 @@ function Invoke-Edit($c, $spec, $map, $all, $protected, $lockDate) {
 
     $inRet = $before.inVATReturn
     $vatOp = ($null -ne $spec.vatRate) -or ($null -ne $spec.vatAmount) -or [bool]$spec.vatNone
+    $grossUps = @($spec.grossUps | Where-Object { $_ })
+    $keepVatNet = [bool]$spec.keepVatNet
     if ($inRet -and ($vatOp -or $spec.splits)) {
         throw "Transaction id $($t.Identifier) is in a posted VAT return; its VAT and amounts can only be changed in the VT GUI (recoding and text edits are allowed)."
     }
@@ -293,9 +298,9 @@ function Invoke-Edit($c, $spec, $map, $all, $protected, $lockDate) {
     }
 
     # ---- line edits
-    $needsLine = ($spec.account -or $spec.splits -or $vatOp -or ($null -ne $spec.lineText))
+    $needsLine = ($spec.account -or $spec.splits -or $grossUps.Count -or $vatOp -or ($null -ne $spec.lineText))
     if ($needsLine) {
-        $what = if ($vatOp) { 'change the VAT on' } elseif ($spec.splits) { 'split' } else { 'edit' }
+        $what = if ($vatOp) { 'change the VAT on' } elseif ($spec.splits) { 'split' } elseif ($grossUps.Count) { 'gross up' } else { 'edit' }
         $e = Resolve-Line $t $spec.line $what
         Assert-EditableLine $t $e $what
         $pos = 0; $i = 0; foreach ($x in $t.Entries) { $i++; if ($x.Identifier -eq $e.Identifier) { $pos = $i } }
@@ -334,6 +339,61 @@ function Invoke-Edit($c, $spec, $map, $all, $protected, $lockDate) {
                 }
                 if ($s.text) { $new.Text = [string]$s.text }
                 $done += "split $amt from $label to '$key'"
+            }
+        }
+
+        # Gross up: the opposite of a split. A new line on the other side (a CIS
+        # deduction credited to the PAYE liability, say) and ChangeValue balanced
+        # against this line, so the line grows by the same amount and the bank
+        # side never moves. With keepVatNet the line is left alone and the uplift
+        # goes on a second, out-of-scope line on the same account instead.
+        #
+        # On a transaction in a posted VAT return VT refuses ChangeValue between
+        # entries whose WithinVATScope differ, so there the new line takes the
+        # line's scope, as the VT GUI does. Both in scope, the in-scope lines still
+        # sum to the old net and the filed return is unaffected. Elsewhere the new
+        # line is out of scope, so the line's full grossed-up net goes on the return.
+        if ($grossUps.Count) {
+            if ([int]$e.TypeID -ne 5) { throw "Only a coded line can be grossed up, not the primary entry" }
+            $lineKey = "$($e.Account.Parent.Name)|$($e.Account.Name)"
+            foreach ($gu in $grossUps) {
+                $to = Find-Account $map $all ([string]$gu.account)
+                $key = "$($to.Parent.Name)|$($to.Name)"
+                if ($protected.ContainsKey($key)) { throw "Refusing to gross up against '$key': VT maintains that account." }
+                if ($key -eq $lineKey) { throw "Gross-up account '$key' is the line's own account" }
+                $amt = [math]::Abs([decimal]$gu.amount)
+                if ($amt -le 0) { throw "Gross-up of $amt to '$key' must be more than 0" }
+                $cur = [decimal]$e.BaseValue
+                $signed = if ($cur -lt 0) { $amt } else { -$amt }   # opposite side to the line
+                $target = $e
+                if ($keepVatNet) {
+                    $target = $t.Entries.Add($e.Account)
+                    if ($target.WithinVATScope -and -not $target.SetWithinVATScopeIfPossible($false)) {
+                        throw "VT would not take the new '$lineKey' line out of VAT scope"
+                    }
+                    $target.Text = if ($gu.text) { [string]$gu.text } else { [string]$e.Text }
+                }
+                $new = $t.Entries.Add($to)
+                $scope = $inRet -and [bool]$target.WithinVATScope
+                if ([bool]$new.WithinVATScope -ne $scope -and -not $new.SetWithinVATScopeIfPossible($scope)) {
+                    throw "VT would not set the new '$key' line's VAT scope to $scope"
+                }
+                $new.Text = if ($gu.text) { [string]$gu.text } else { [string]$e.Text }
+                $new.ChangeValue([decimal]$signed, $target)
+                if ($keepVatNet) {
+                    $done += "grossed up '$lineKey' by $($amt.ToString('0.00')) on a new out-of-scope line, against '$key' (VAT net unchanged)"
+                } else {
+                    $done += "$label grossed up $cur -> $([decimal]$e.BaseValue) against '$key' ($($signed.ToString('0.00')))"
+                    if ($scope) {
+                        $warnings += "'$key' line is within VAT scope, as VT requires on a transaction in a posted VAT return; the VAT net is unchanged"
+                    } elseif ($e.WithinVATScope) {
+                        $warnings += "$label is within VAT scope: the net VT reports for this transaction rises by $($amt.ToString('0.00'))"
+                        $ve = Get-VatEntry $t
+                        if ($ve -and [decimal]$ve.BaseValue -ne 0) {
+                            $warnings += "the transaction carries VAT of $([decimal]$ve.BaseValue), which is unchanged; check it still matches the grossed-up net"
+                        }
+                    }
+                }
             }
         }
 

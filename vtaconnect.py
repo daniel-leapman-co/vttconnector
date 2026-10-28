@@ -129,6 +129,10 @@ def edit(vtr, spec, commit=False):
         lineText                         that line's entry details
         vatRate | vatAmount | vatNone    re-split that line's gross into net + VAT
         splits: [{account, amount, text}] carve amounts off that line
+        grossUps: [{account, amount, text}]  raise that line against new opposite-side
+                                         lines (bank side unchanged)
+        keepVatNet                       with grossUps: leave the line, post the uplift
+                                         as a new out-of-scope line on its account
         force                            allow edits on or before the lock date
 
     The whole batch runs in one VT transaction and is rolled back unless commit.
