@@ -36,14 +36,17 @@ looks like this in each:
   them as they are. Under WSL, convert them with `wslpath -u`.
 - In PowerShell, continue long commands with a backtick, not `\`. Example
   commands in these skills use bash syntax, so adjust them when running in
-  PowerShell. A `|` inside a quoted `--line` or `--account` value is fine in
-  every shell.
+  PowerShell. A `|` inside a quoted `--line` or `--account` value is safe when
+  `vtt` resolves to `vtt.ps1` (PowerShell), `vtt.cmd` (cmd) or the `vtt` script
+  (Git Bash, WSL). **Never call `vtt.cmd` explicitly from PowerShell.**
+  PowerShell drops the quotes from arguments without spaces, so cmd.exe then
+  treats `Bank|Current` as a pipe. Use plain `vtt`.
 
 ### Finding `vtt`
 
 | Platform | Command | Source checkout |
 | --- | --- | --- |
-| Windows | `vtt` (runs `vtt.cmd`) once the checkout is on PATH; otherwise `python "<checkout>\vtt"` | wherever it was cloned, e.g. `%USERPROFILE%\Projects\vttconnector` |
+| Windows | `vtt` once the checkout is on PATH (PowerShell runs `vtt.ps1`, cmd runs `vtt.cmd`); otherwise `python "<checkout>\vtt"` | wherever it was cloned, e.g. `%USERPROFILE%\Projects\vttconnector` |
 | WSL | `vtt` on PATH, or `./vtt` in the checkout | e.g. `~/tools/vttconnector` |
 
 From Git Bash on Windows, `vtt` (the Python script) and `vtt.cmd` both work.
@@ -276,7 +279,8 @@ In practice:
 | File | What it is |
 | --- | --- |
 | `vtt` | The CLI. Start here. |
-| `vtt.cmd` | Windows launcher for `vtt` (cmd / PowerShell). |
+| `vtt.ps1` | PowerShell launcher for `vtt`. Calls Python directly, so `|` in arguments survives. `VTT_PYTHON` overrides the interpreter. |
+| `vtt.cmd` | cmd.exe launcher for `vtt`. |
 | `vtaconnect.py` | Python wrapper: finds 32-bit PowerShell, maps paths (native Windows or WSL), stages files under WSL, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`). |
 | `vta.ps1` | The COM layer. Runs under 32-bit PowerShell; not called directly. |
 | `vtr.py` | Independent read-only parser of the `.vtr` binary format. No Windows needed. Used by `vtt check`. |

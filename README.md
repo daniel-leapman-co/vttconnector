@@ -24,7 +24,10 @@ when you type into the GUI. There is also an independent read-only parser of the
   installed — check with `reg.exe query "HKCR\VTA.Company"`.
 * Python 3.9+, standard library only.
 
-On Windows, run `vtt.cmd` (or `python vtt`). Under WSL, run `./vtt`. To call it
+On Windows, run `.\vtt` from PowerShell (it runs `vtt.ps1`), `vtt` from cmd
+(`vtt.cmd`), or `python vtt` anywhere. Don't call `vtt.cmd` explicitly from
+PowerShell: PowerShell strips quotes from arguments without spaces, so cmd.exe
+reads the `|` in `"Bank|Current"` as a pipe. Under WSL, run `./vtt`. To call it
 as plain `vtt` from anywhere, see [Setup](#setup).
 
 VTA is a **32-bit** in-process COM server, so the connector drives it through
