@@ -16,14 +16,6 @@ when you type into the GUI. There is also an independent read-only parser of the
 
 ---
 
-Claude Code skills that drive this tool — `vtt`, `vtt-post` and `vtt-import` —
-live in a separate repository, [claude-skills][skills], cloned to
-`~/.claude/skills`.
-
-[skills]: https://github.com/daniel-leapman-co/claude-skills
-
----
-
 ## Requirements
 
 * A machine with VT Transaction+ installed. Runs either **natively on Windows**
@@ -32,8 +24,8 @@ live in a separate repository, [claude-skills][skills], cloned to
   installed — check with `reg.exe query "HKCR\VTA.Company"`.
 * Python 3.9+, standard library only.
 
-On Windows, run `vtt.cmd` (or `python vtt`); put the repo folder on `PATH` to
-call it as plain `vtt`. Under WSL, run `./vtt`.
+On Windows, run `vtt.cmd` (or `python vtt`). Under WSL, run `./vtt`. To call it
+as plain `vtt` from anywhere, see [Setup](#setup).
 
 VTA is a **32-bit** in-process COM server, so the connector drives it through
 `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`. That is handled for
@@ -42,6 +34,66 @@ you.
 On native Windows every file is used in place. Under WSL, COM cannot open files on the Linux side. Files under `/mnt/...` are used
 in place; anything else is staged to `C:\Temp\vtaconnect`, and copied back **only
 when a post is committed**.
+
+---
+
+## Setup
+
+### 1. Clone and put `vtt` on PATH
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/daniel-leapman-co/vttconnector "$HOME\Projects\vttconnector"
+$repo = "$HOME\Projects\vttconnector"
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$repo", "User")
+```
+
+Open a new terminal, then check it with `vtt --help`.
+
+**WSL:**
+
+```bash
+git clone https://github.com/daniel-leapman-co/vttconnector ~/tools/vttconnector
+mkdir -p ~/.local/bin && ln -s ~/tools/vttconnector/vtt ~/.local/bin/vtt
+```
+
+### 2. Install the Claude Code skills
+
+The repo includes three [Claude Code](https://claude.com/claude-code) skills in
+[`skills/`](skills). They teach Claude how VT Transaction+ works and how to drive
+`vtt` safely:
+
+| Skill | What it covers |
+| --- | --- |
+| `vtt` | How VT stores data, VAT and its traps, the full `vtt` command reference, Windows vs WSL paths, the COM API |
+| `vtt-post` | Step-by-step posting from a bank statement: chart, precedent, reconcile, post a batch |
+| `vtt-import` | Preparing a VT Universal Input Sheet for import |
+
+Install them by linking each folder into your personal skills directory. A
+link, rather than a copy, means `git pull` keeps the skills up to date.
+
+**Windows (PowerShell)** — directory junctions, no admin rights needed:
+
+```powershell
+$repo = "$HOME\Projects\vttconnector"
+New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
+foreach ($s in "vtt", "vtt-post", "vtt-import") {
+    New-Item -ItemType Junction -Path "$HOME\.claude\skills\$s" -Target "$repo\skills\$s"
+}
+```
+
+**WSL:**
+
+```bash
+mkdir -p ~/.claude/skills
+for s in vtt vtt-post vtt-import; do ln -s ~/tools/vttconnector/skills/$s ~/.claude/skills/$s; done
+```
+
+Claude Code on Windows and Claude Code inside WSL have separate home
+directories. Install the skills in whichever one (or both) you run Claude from.
+Restart Claude Code to pick them up. Claude then loads them on its own when you
+ask about VT or `.vtr` files, or you can call one by name, e.g. `/vtt-post`.
 
 ---
 

@@ -3,26 +3,64 @@
 Command line access to `.vtr` files. Reads through both VT's COM API (VTA) and an
 independent binary parser; writes only through VTA.
 
-- **Binary:** `vtt`, on PATH. Source and full docs in `~/tools/vttconnector`
-  (`README.md`), which is authoritative if it disagrees with this file.
+- **Binary:** `vtt`, normally on PATH. Source and full docs are in the
+  vttconnector checkout (`README.md`), which is authoritative if it disagrees with
+  this file. See *Finding `vtt`* below if the command is not found.
 - Run it from anywhere — the client's folder is fine. Give the `.vtr` path
   absolute and **quoted**; these filenames have spaces.
 - `--json` on any command gives machine-readable output.
 
 ## Environment
 
-The connector runs on Linux under WSL but VTA runs on the Windows host, so a few
-constraints leak through:
+`vtt` runs either **natively on Windows** or **under WSL**. VTA itself always
+runs on Windows. Work out which one you are on before building paths. On Windows
+the platform is `win32` and paths look like `C:\...`; under WSL it is Linux and
+paths look like `/mnt/c/...` or `/home/...`.
+
+### Paths
+
+Use the path style of the shell you are running `vtt` from. The same client file
+looks like this in each:
+
+| Shell | Path to pass |
+| --- | --- |
+| PowerShell / cmd (native Windows) | `"C:\Users\Name\OneDrive\Clients\Acme Ltd\Acme Ltd.vtr"` |
+| Git Bash (native Windows) | `"C:/Users/Name/OneDrive/Clients/Acme Ltd/Acme Ltd.vtr"` or `"/c/Users/Name/..."` |
+| WSL bash | `"/mnt/c/Users/Name/OneDrive/Clients/Acme Ltd/Acme Ltd.vtr"` |
+
+- Always quote the path. Client folders and filenames contain spaces.
+- Do not hand a WSL path (`/mnt/c/...`) to Windows `vtt`, or a `C:\` path to
+  WSL `vtt`. Convert it first: under WSL, use `wslpath -u 'C:\...'` or
+  `wslpath -w /mnt/c/...`. On Windows, `/mnt/c/X` is just `C:\X`.
+- Paths a user pastes from Explorer are Windows paths. On native Windows, use
+  them as they are. Under WSL, convert them with `wslpath -u`.
+- In PowerShell, continue long commands with a backtick, not `\`. Example
+  commands in these skills use bash syntax, so adjust them when running in
+  PowerShell. A `|` inside a quoted `--line` or `--account` value is fine in
+  every shell.
+
+### Finding `vtt`
+
+| Platform | Command | Source checkout |
+| --- | --- | --- |
+| Windows | `vtt` (runs `vtt.cmd`) once the checkout is on PATH; otherwise `python "<checkout>\vtt"` | wherever it was cloned, e.g. `%USERPROFILE%\Projects\vttconnector` |
+| WSL | `vtt` on PATH, or `./vtt` in the checkout | e.g. `~/tools/vttconnector` |
+
+From Git Bash on Windows, `vtt` (the Python script) and `vtt.cmd` both work.
+
+### Constraints
+
+These come from the COM server, on either platform:
 
 - **`VTA.dll` is already registered** by the VT Transaction+ installer at
   `C:\Windows\SysWow64\VTA.dll`. No `regsvr32`. Check with
   `reg.exe query "HKCR\VTA.Company"`.
 - **VTA is 32-bit**, so it must be driven from
   `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`. Handled for you.
-- **COM cannot open files on the Linux side of WSL.** Files already under
-  `/mnt/...` are used in place — so a client file on OneDrive is read directly —
-  and anything else is staged to `C:\Temp\vtaconnect` and copied back **only on
-  commit**.
+- **File access.** On native Windows, every `.vtr` file is opened where it is.
+  Under WSL, COM cannot open files on the Linux side: files under `/mnt/...` are
+  used in place (so a client file on OneDrive is read directly), and anything
+  else is staged to `C:\Temp\vtaconnect` and copied back **only on commit**.
 - **Encoding.** Redirected PowerShell stdout defaults to the OEM code page and
   used to throw `UnicodeDecodeError` on accented narratives. `vta.ps1` now forces
   UTF-8 and `vtaconnect.py` decodes with a cp1252/cp850 fallback. If a new client
@@ -31,7 +69,7 @@ constraints leak through:
   for write and fails with *"Write access denied. File may be read-only or already
   open."* Ask the user to close VT and retry.
 
-Nothing is installed on the Linux side; standard library only.
+Needs only Python 3.9+ and its standard library, on either platform.
 
 ## Reading
 
@@ -233,12 +271,13 @@ In practice:
 - The read-only commands (`info`, `accounts`, `chart`, `tb`, `balance`, `entries`)
   do not touch the file at all — the hash is stable across repeated runs.
 
-## The files in ~/tools/vttconnector
+## The files in the vttconnector checkout
 
 | File | What it is |
 | --- | --- |
 | `vtt` | The CLI. Start here. |
-| `vtaconnect.py` | Python wrapper: WSL↔Windows interop, path staging, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`). |
+| `vtt.cmd` | Windows launcher for `vtt` (cmd / PowerShell). |
+| `vtaconnect.py` | Python wrapper: finds 32-bit PowerShell, maps paths (native Windows or WSL), stages files under WSL, JSON. Importable as a library (`info`, `accounts`, `entries`, `trial_balance`, `post`). |
 | `vta.ps1` | The COM layer. Runs under 32-bit PowerShell; not called directly. |
 | `vtr.py` | Independent read-only parser of the `.vtr` binary format. No Windows needed. Used by `vtt check`. |
 | `dumptlb.ps1` | Dumps VTA interface signatures from the type library. Use when extending `vta.ps1` — see [internals.md](internals.md). |

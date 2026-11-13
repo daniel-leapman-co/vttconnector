@@ -4,7 +4,8 @@
 > `.vtr` file is available, read the real chart from it instead:
 >
 > ```bash
-> vtt chart "/mnt/c/.../Client.vtr" --format markdown --with-precedent 6
+> vtt chart "C:\...\Client.vtr" --format markdown --with-precedent 6       # native Windows
+> vtt chart "/mnt/c/.../Client.vtr" --format markdown --with-precedent 6   # WSL
 > ```
 >
 > Charts get edited — accounts renamed, added, or deleted — and an account name
