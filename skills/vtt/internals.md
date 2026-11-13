@@ -55,7 +55,14 @@ Notes for maintaining `vtr.py`, which is read-only by design:
 Dump the real signature of anything in the object model rather than probing with
 `Get-Member`:
 
+```powershell
+# native Windows (from the checkout)
+& "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" `
+  -ExecutionPolicy Bypass -File dumptlb.ps1 -Types _Transaction,_Entries
+```
+
 ```bash
+# WSL (from the checkout, which must be under /mnt for PowerShell to read it)
 /mnt/c/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe \
   -ExecutionPolicy Bypass -File dumptlb.ps1 -Types _Transaction,_Entries
 ```

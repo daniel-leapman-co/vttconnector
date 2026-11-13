@@ -5,7 +5,7 @@ description: Connect to a VT Transaction+ .vtr ledger and post transactions into
 
 # Posting into VT Transaction+ (vttconnector)
 
-Drives the `vtt` CLI (installed on PATH; source in `~/tools/vttconnector`), which reads
+Drives the `vtt` CLI (installed on PATH; source in the vttconnector checkout), which reads
 and writes `.vtr` files through VT's own COM API. Every write goes through VT, so its
 indexes, cached balances and year-end postings stay correct.
 
@@ -24,9 +24,13 @@ invents or round-trips an *amount* — amounts come straight from the statement.
 
 ## Ground rules (read first)
 
-- **`vtt` is on PATH** (source in `~/tools/vttconnector`) — run it from any directory,
-  e.g. the client's folder. Give the `.vtr` path absolute and quoted; these files have
-  spaces.
+- **`vtt` is on PATH** — run it from any directory, e.g. the client's folder. Give
+  the `.vtr` path absolute and quoted; these files have spaces. It runs natively on
+  Windows or under WSL, so match the path to the shell: `"C:\...\Client.vtr"` in
+  PowerShell, `"C:/.../Client.vtr"` in Git Bash, `"/mnt/c/.../Client.vtr"` in WSL.
+  A path the user pastes from Explorer is a Windows path; convert it with
+  `wslpath -u` only if you are in WSL. Details: *Paths* in the `vtt` skill's
+  connector.md.
 - **The file must be closed in VT.** Posts (even dry runs) fail with *"Write access
   denied. File may be read-only or already open."* if VT has it open. If you hit that,
   ask the user to close VT, then retry.

@@ -1,6 +1,6 @@
 ---
 name: vtt
-description: General knowledge about VT Transaction+ (VTT+) and reference for the vttconnector `vtt` CLI. Covers how VT stores data (ledgers, accounts, transactions, entries, year ends, lock dates), how VAT works in VT and why a hand-built VAT line silently breaks boxes 6 and 7, the details/entry details narrative convention, the three supported ways to get data into a .vtr file and why the binary format must never be hand-written, the full `vtt` command reference and its WSL/COM environment, and the VTA COM API traps. Use when asked how VT or the vtt connector works, when reading data out of a .vtr, when choosing between the posting routes, when diagnosing a VT or `vtt` error, or when extending vttconnector itself. For the step-by-step posting workflow use vtt-post; for preparing a Universal Input Sheet use vtt-import.
+description: General knowledge about VT Transaction+ (VTT+) and reference for the vttconnector `vtt` CLI. Covers how VT stores data (ledgers, accounts, transactions, entries, year ends, lock dates), how VAT works in VT and why a hand-built VAT line silently breaks boxes 6 and 7, the details/entry details narrative convention, the three supported ways to get data into a .vtr file and why the binary format must never be hand-written, the full `vtt` command reference and its Windows/WSL COM environment and path handling, and the VTA COM API traps. Use when asked how VT or the vtt connector works, when reading data out of a .vtr, when choosing between the posting routes, when diagnosing a VT or `vtt` error, or when extending vttconnector itself. For the step-by-step posting workflow use vtt-post; for preparing a Universal Input Sheet use vtt-import.
 ---
 
 # VT Transaction+ and the vtt connector
@@ -19,7 +19,8 @@ The two workflow skills sit on top of it:
 ## Reference files
 
 - [connector.md](connector.md) — the `vtt` CLI: every command, the posting input
-  forms, the safety model, and the WSL/32-bit COM environment it needs.
+  forms, the safety model, Windows vs WSL paths, and the 32-bit COM environment
+  it needs.
 - [data-model.md](data-model.md) — ledgers, accounts, transactions, entries,
   transaction types, control ledgers, the details/entry details convention, lock
   dates and year ends.
@@ -45,8 +46,11 @@ denormalised balances and year-end postings exactly as it does for the GUI.
 
 ## Cheat sheet
 
-`vtt` is on PATH; source in `~/tools/vttconnector` (full docs in its `README.md`).
-Quote the `.vtr` path — client filenames contain spaces.
+`vtt` is on PATH (full docs in the vttconnector checkout's `README.md`). It runs
+natively on Windows or under WSL. Pass the `.vtr` path in the style of the shell
+you are in: `"C:\...\Client.vtr"` in PowerShell, `"/mnt/c/.../Client.vtr"` in
+WSL. See *Paths* in [connector.md](connector.md). Quote the path — client
+filenames contain spaces.
 
 ```
 vtt info     "FILE.vtr"                                   # company, VAT no, year end, lock date, type codes

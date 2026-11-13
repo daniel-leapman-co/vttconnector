@@ -21,7 +21,8 @@ Every file's chart is edited — accounts renamed, added, or never used — and 
 account name that is not in the file is rejected on import.
 
 ```bash
-vtt chart "/mnt/c/.../Client.vtr" --format markdown --with-precedent 6
+vtt chart "C:\...\Client.vtr" --format markdown --with-precedent 6       # native Windows
+vtt chart "/mnt/c/.../Client.vtr" --format markdown --with-precedent 6   # WSL
 ```
 
 This gives the accounts that actually exist, plus how often each has been used,
