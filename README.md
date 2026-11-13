@@ -26,16 +26,20 @@ live in a separate repository, [claude-skills][skills], cloned to
 
 ## Requirements
 
-* WSL on a machine with VT Transaction+ installed.
+* A machine with VT Transaction+ installed. Runs either **natively on Windows**
+  or under **WSL**.
 * `VTA.dll` registered on the Windows host. It already is if VT Transaction+ is
   installed — check with `reg.exe query "HKCR\VTA.Company"`.
-* Nothing to install on the Linux side; standard library only.
+* Python 3.9+, standard library only.
+
+On Windows, run `vtt.cmd` (or `python vtt`); put the repo folder on `PATH` to
+call it as plain `vtt`. Under WSL, run `./vtt`.
 
 VTA is a **32-bit** in-process COM server, so the connector drives it through
 `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`. That is handled for
 you.
 
-COM cannot open files on the Linux side of WSL. Files under `/mnt/...` are used
+On native Windows every file is used in place. Under WSL, COM cannot open files on the Linux side. Files under `/mnt/...` are used
 in place; anything else is staged to `C:\Temp\vtaconnect`, and copied back **only
 when a post is committed**.
 

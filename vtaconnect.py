@@ -1,4 +1,4 @@
-"""Drive the VTA COM connector from WSL.
+"""Drive the VTA COM connector from Windows or WSL.
 
 VTA.dll is a 32-bit Windows COM server, so the work happens in 32-bit
 PowerShell on the Windows host. This module handles the interop details:
@@ -23,11 +23,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-PS32 = Path("/mnt/c/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe")
+# Runs either natively on Windows or under WSL, driving the Windows host.
+NATIVE = os.name == "nt"
+if NATIVE:
+    _WINDIR = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    PS32 = _WINDIR / "SysWOW64" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    _DEFAULT_STAGE = r"C:\Temp\vtaconnect"
+else:
+    PS32 = Path("/mnt/c/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe")
+    _DEFAULT_STAGE = "/mnt/c/Temp/vtaconnect"
 SCRIPT = Path(__file__).with_name("vta.ps1")
 # Overridable so a development checkout can stage its own vta.ps1 without
 # overwriting the one a concurrent run of the installed tool is using.
-STAGE = Path(os.environ.get("VTACONNECT_STAGE", "/mnt/c/Temp/vtaconnect"))
+STAGE = Path(os.environ.get("VTACONNECT_STAGE", _DEFAULT_STAGE))
 
 
 class VtaError(RuntimeError):
@@ -45,6 +53,8 @@ def _decode(b: bytes) -> str:
 
 
 def _win_path(p: Path) -> str:
+    if NATIVE:
+        return str(p)
     out = subprocess.run(["wslpath", "-w", str(p)], capture_output=True, text=True)
     if out.returncode:
         raise VtaError(f"cannot map {p} to a Windows path")
@@ -60,7 +70,8 @@ def _run(action: str, vtr: Path, *, date=None, spec=None, commit=False):
         raise VtaError(f"no such file: {vtr}")
 
     STAGE.mkdir(parents=True, exist_ok=True)
-    staged = not str(vtr).startswith("/mnt/")
+    # Native Windows paths are always usable in place; under WSL only /mnt is.
+    staged = not NATIVE and not str(vtr).startswith("/mnt/")
     work = STAGE / vtr.name if staged else vtr
     if staged:
         shutil.copy2(vtr, work)
@@ -189,7 +200,7 @@ def main(argv):
         elif action == "tb":
             r = trial_balance(path, argv[3])
         elif action == "post":
-            spec = json.loads(Path(argv[3]).read_text())
+            spec = json.loads(Path(argv[3]).read_text(encoding="utf-8-sig"))
             r = post(path, spec, commit="--commit" in argv)
             if not r.get("ok"):
                 print(json.dumps(r, indent=2))

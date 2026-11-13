@@ -399,7 +399,7 @@ def cmd_entries(args):
 
 def cmd_post(args):
     if args.json_file:
-        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text()
+        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text(encoding="utf-8-sig")
         spec = json.loads(text)
         spec = spec if isinstance(spec, list) else [spec]
     elif args.csv_file:
@@ -529,7 +529,7 @@ def parse_split(s, flag="--split"):
 
 def cmd_edit(args):
     if args.json_file:
-        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text()
+        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text(encoding="utf-8-sig")
         spec = json.loads(text)
         spec = spec if isinstance(spec, list) else [spec]
     else:
@@ -607,7 +607,7 @@ def cmd_edit(args):
 
 def cmd_add_account(args):
     if args.json_file:
-        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text()
+        text = sys.stdin.read() if args.json_file == "-" else Path(args.json_file).read_text(encoding="utf-8-sig")
         spec = json.loads(text)
         spec = spec if isinstance(spec, list) else [spec]
     else:
@@ -852,6 +852,11 @@ def build_parser():
 
 
 def main(argv=None):
+    # Windows consoles and pipes default to a legacy code page; account names
+    # and narratives can carry £ or accents.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args) or 0
